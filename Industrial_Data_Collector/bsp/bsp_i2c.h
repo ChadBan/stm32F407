@@ -12,7 +12,11 @@
 
 bool bsp_i2c_init(void);
 
-/* 写 len 字节到从机 devaddr(7bit<<0 传入约定为 HAL 的 8bit 地址) */
+/* 探测从机是否存在：发 START+地址+STOP 看是否 ACK（不写数据，安全）。
+   dev_addr 为 7bit 地址（HAL 内部自动左移 1 位），返回 true 表示从机应答。 */
+bool bsp_i2c_probe(uint16_t dev_addr);
+
+/* 写 len 字节到从机，dev_addr 为 7bit 地址（如 SHT30=0x44） */
 bool bsp_i2c_write(uint16_t dev_addr, const uint8_t *data, uint16_t len, uint32_t timeout_ms);
 
 /* 读 len 字节 */

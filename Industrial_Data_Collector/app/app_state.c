@@ -37,7 +37,7 @@ bool app_state_init(void)
     g_q_data = xQueueCreate(QUEUE_DEPTH_DATA, sizeof(collect_sample_t));
     if (g_lock == NULL || g_q_data == NULL)
         return false;
-
+    
     /* 从 Flash 恢复参数；无有效数据(首刷)则用默认值 */
     g_params = PARAM_DEFAULT;
     uint16_t n = w25q_load_params((uint8_t *)&g_params, sizeof(g_params));

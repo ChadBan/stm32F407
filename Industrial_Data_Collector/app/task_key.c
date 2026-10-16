@@ -61,13 +61,26 @@ void key_task(void *arg)
                 switch (field)
                 {
                 case 0:
-                    p.temp_alarm_hi = (int16_t)(p.temp_alarm_hi + 5 * dir);
-                    changed = true;
-                    break;
+                {
+                    /* 温度阈值限幅 -40.0~125.0C(x10)，防止反复按键 int16 溢出回绕 */
+                    int32_t v = (int32_t)p.temp_alarm_hi + 5 * dir;
+                    if (v >= -400 && v <= 1250)
+                    {
+                        p.temp_alarm_hi = (int16_t)v;
+                        changed = true;
+                    }
+                }
+                break;
                 case 1:
-                    p.temp_alarm_lo = (int16_t)(p.temp_alarm_lo + 5 * dir);
-                    changed = true;
-                    break;
+                {
+                    int32_t v = (int32_t)p.temp_alarm_lo + 5 * dir;
+                    if (v >= -400 && v <= 1250)
+                    {
+                        p.temp_alarm_lo = (int16_t)v;
+                        changed = true;
+                    }
+                }
+                break;
                 case 2:
                 {
                     int32_t v = (int32_t)p.batt_alarm_mv + 50 * dir;

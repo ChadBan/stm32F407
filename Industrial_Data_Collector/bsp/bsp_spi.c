@@ -4,9 +4,30 @@
  */
 #include "bsp_spi.h"
 #include "semphr.h"
+#include "task.h"
 #include <string.h>
 
 static SemaphoreHandle_t g_spi_mutex;
+
+/* 调度器未启动时单线程，无需互斥；且此时调用 xSemaphoreTake 会残留 BASEPRI
+   （FreeRTOS 哨兵计数 uxCriticalNesting=0xaaaaaaaa），屏蔽 SysTick 使 HAL 超时
+   冻结。故启动阶段直接放行，与 bsp_i2c.c 的 i2c_lock 保持一致。 */
+static bool spi_lock(uint32_t timeout_ms)
+{
+    if (g_spi_mutex == NULL)
+        return false;
+    if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED)
+        return true;
+    return xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(timeout_ms + 50)) == pdTRUE;
+}
+static void spi_unlock(void)
+{
+    if (g_spi_mutex == NULL)
+        return;
+    if (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED)
+        return;
+    xSemaphoreGive(g_spi_mutex);
+}
 
 bool bsp_spi_init(void)
 {
@@ -24,9 +45,7 @@ bool bsp_spi_xfer(const uint8_t *tx, uint8_t *rx, uint16_t len, uint32_t timeout
 {
     if (len == 0 || (tx == NULL && rx == NULL))
         return false;
-    if (g_spi_mutex == NULL)
-        return false;
-    if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(timeout_ms + 50)) != pdTRUE)
+    if (!spi_lock(timeout_ms))
         return false;
 
     W25Q_CS_LOW();
@@ -46,7 +65,7 @@ bool bsp_spi_xfer(const uint8_t *tx, uint8_t *rx, uint16_t len, uint32_t timeout
     }
     W25Q_CS_HIGH();
 
-    xSemaphoreGive(g_spi_mutex);
+    spi_unlock();
     return st == HAL_OK;
 }
 
@@ -63,9 +82,7 @@ bool bsp_spi_xfer_flash(const uint8_t *hdr, uint16_t hdr_len,
 {
     if (hdr == NULL || hdr_len == 0)
         return false;
-    if (g_spi_mutex == NULL)
-        return false;
-    if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(timeout_ms + 50)) != pdTRUE)
+    if (!spi_lock(timeout_ms))
         return false;
 
     /* CS 全程拉低：W25Q 命令在 CS 上升沿才结束，中间拉高会丢弃命令 */
@@ -97,6 +114,6 @@ bool bsp_spi_xfer_flash(const uint8_t *hdr, uint16_t hdr_len,
     }
     W25Q_CS_HIGH();
 
-    xSemaphoreGive(g_spi_mutex);
+    spi_unlock();
     return st == HAL_OK;
 }

@@ -18,7 +18,7 @@
 #include "bsp_pwm.h"
 #include "bsp_wdg.h"
 
-#include "dev_oled.h"
+#include "dev_lcd.h"
 #include "app_state.h"
 #include "app_tasks.h"
 
@@ -33,6 +33,8 @@ extern void MX_USART2_UART_Init(void);
 extern void MX_TIM4_Init(void);
 extern void MX_RTC_Init(void);
 extern void MX_DMA_Init(void);
+extern void MX_FSMC_Init(void); /* FSMC：TFT LCD 8080 并口 */
+extern void sys_tick_rtos_enable(void); /* stm32f4xx_it.c：调度器启动后允许 SysTick 进 FreeRTOS */
 
 static void bsp_init_all(void)
 {
@@ -45,6 +47,7 @@ static void bsp_init_all(void)
     MX_ADC1_Init();
     MX_TIM4_Init();
     MX_RTC_Init();
+    MX_FSMC_Init();
 
     bsp_gpio_init();
     (void)bsp_i2c_init();
@@ -53,22 +56,61 @@ static void bsp_init_all(void)
     bsp_rtc_init();
     bsp_pwm_init();
     (void)bsp_adc_init();
-    bsp_wdg_init(3000); /* IWDG ~3s */
+    bsp_wdg_init(3000);
 }
 
 int main(void)
 {
+    uint32_t reset_csr = RCC->CSR; /* 上电后第一时间抓取复位标志，供下面打印复位原因 */
     HAL_Init();
     SystemClock_Config();
     bsp_init_all();
+    /* bsp_init_all 里的 xSemaphoreCreate* 在调度器启动前会残留 BASEPRI=0x50
+       （FreeRTOS 哨兵计数），提前清一次，保证复位原因打印/后续 RTC、Flash
+       读写的 HAL 超时依赖的 SysTick 不被屏蔽。 */
+    __set_BASEPRI(0);
+
+    /* 复位原因诊断：iwdg=看门狗复位(有任务卡死)，soft=HardFault 主动复位，
+       por/nrst-pin=上电/按键复位。据此判断复位循环的源头。 */
+    {
+        const char *src = "unknown";
+        if (reset_csr & RCC_CSR_IWDGRSTF)
+            src = "iwdg";
+        else if (reset_csr & RCC_CSR_WWDGRSTF)
+            src = "wwdg";
+        else if (reset_csr & RCC_CSR_SFTRSTF)
+            src = "soft";
+        else if (reset_csr & RCC_CSR_PINRSTF)
+            src = "nrst-pin";
+        else if (reset_csr & RCC_CSR_LPWRRSTF)
+            src = "low-power";
+        else if (reset_csr & RCC_CSR_PORRSTF)
+            src = "por";
+        bsp_dbg_printf("boot: reset=%s csr=0x%lx\r\n", src, (unsigned long)reset_csr);
+        __HAL_RCC_CLEAR_RESET_FLAGS();
+    }
 
     /* 业务初始化：状态中心依赖 SPI Flash 读参数，须在驱动 init 之后 */
     (void)app_state_init();
-    (void)oled_init();
+    /* 启动阶段 FreeRTOS 临界区会残留 BASEPRI(哨兵计数，xPortStartScheduler
+       才重置)，手动清零，避免启动路径上 HAL 超时依赖的 SysTick 被屏蔽 */
+    __set_BASEPRI(0);
 
-    /* 创建任务，失败则进入错误处理（此处靠 IWDG 复位兜底） */
-    (void)app_tasks_start();
+    /* TFT LCD（ILI9488）走 FSMC 并口，与 I2C 无关；直接初始化并清屏。
+       SHT30 若未接，采集任务降级为“传感器故障”报警，属正常。 */
+    lcd_init();
+    bsp_dbg_printf("boot: lcd ok\r\n");
 
+    /* 创建任务，失败则停喂狗让 IWDG 复位重试（避免“空转无任务”状态） */
+    if (!app_tasks_start())
+    {
+        bsp_dbg_printf("boot: task create failed\r\n");
+        for (;;)
+        {
+        }
+    }
+
+    sys_tick_rtos_enable(); /* 此后 SysTick 中断才开始进 FreeRTOS tick */
     vTaskStartScheduler();
     for (;;)
     {

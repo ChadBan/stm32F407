@@ -5,7 +5,7 @@
 #include "dev_sht30.h"
 #include "bsp_i2c.h"
 
-#define SHT30_ADDR 0x88          /* 8bit 写地址（ADDR->LOW 时 0x44<<1） */
+#define SHT30_ADDR 0x44          /* 7bit 地址（ADDR 脚接 GND 时 0x44；HAL 内部左移 1 位） */
 #define SHT30_CMD_MEAS_HS 0x2C06 /* single-shot, clock stretch, high repeatability */
 
 /* SHT30 CRC-8：多项式 0x31，初值 0xFF */

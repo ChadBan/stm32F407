@@ -6,6 +6,7 @@
  * 与 Inc/board_config.h 的引脚/资源约定严格一致。
  */
 #include "board_config.h"
+#include "stm32f4xx_hal_gpio_ex.h" /* __HAL_AFIO_REMAP_SWJ_NOJTAG 等重映射宏 */
 
 /* ================= 外设句柄（board_config.h 中 extern 声明） ================= */
 ADC_HandleTypeDef hadc1;
@@ -63,7 +64,10 @@ void MX_GPIO_Init(void)
 {
     GPIO_InitTypeDef g = {0};
     __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE(); /* 按键 KEY1/KEY0 (PE3/PE4) */
+    __HAL_RCC_GPIOG_CLK_ENABLE(); /* RS485 方向脚 PG9 */
 
     /* LED PC13 推挽输出，默认灭 */
     g.Pin = LED_RUN_PIN;
@@ -73,7 +77,7 @@ void MX_GPIO_Init(void)
     HAL_GPIO_Init(LED_RUN_PORT, &g);
     HAL_GPIO_WritePin(LED_RUN_PORT, LED_RUN_PIN, GPIO_PIN_SET);
 
-    /* RS485 DE PA1 推挽输出，默认接收 */
+    /* RS485 DE PG9 推挽输出，默认接收（探索者标准） */
     g.Pin = RS485_DE_PIN;
     g.Mode = GPIO_MODE_OUTPUT_PP;
     g.Pull = GPIO_NOPULL;
@@ -81,7 +85,7 @@ void MX_GPIO_Init(void)
     HAL_GPIO_Init(RS485_DE_PORT, &g);
     RS485_SET_RX();
 
-    /* W25Q CS PA8 推挽输出，默认高 */
+    /* W25Q CS PB14 推挽输出，默认高（探索者板载 Flash 片选） */
     g.Pin = W25Q_CS_PIN;
     g.Mode = GPIO_MODE_OUTPUT_PP;
     g.Pull = GPIO_NOPULL;
@@ -89,22 +93,25 @@ void MX_GPIO_Init(void)
     HAL_GPIO_Init(W25Q_CS_PORT, &g);
     W25Q_CS_HIGH();
 
-    /* 按键：PA0/PA2/PA3 下拉输入 + 上升沿 EXTI；PC13 上拉输入 + 下降沿(低有效) */
-    static const uint16_t keys_hi[3] = {GPIO_PIN_0, GPIO_PIN_2, GPIO_PIN_3};
+    /* 按键（探索者标准）：
+       WK_UP(PA0)：下拉 + 上升沿（按下高电平）
+       KEY1(PE3)/KEY0(PE4)：上拉 + 下降沿（按下低电平） */
     g.Mode = GPIO_MODE_IT_RISING;
     g.Pull = GPIO_PULLDOWN;
-    for (int i = 0; i < 3; i++)
-    {
-        g.Pin = keys_hi[i];
-        HAL_GPIO_Init(GPIOA, &g);
-    }
+    g.Pin = GPIO_PIN_0; /* WK_UP 高有效 */
+    HAL_GPIO_Init(GPIOA, &g);
+
+    g.Mode = GPIO_MODE_IT_FALLING;
+    g.Pull = GPIO_PULLUP;
+    g.Pin = GPIO_PIN_3 | GPIO_PIN_4; /* KEY1 / KEY0 低有效 */
+    HAL_GPIO_Init(GPIOE, &g);
 
     HAL_NVIC_SetPriority(EXTI0_IRQn, 6, 0);
-    HAL_NVIC_SetPriority(EXTI2_IRQn, 6, 0);
     HAL_NVIC_SetPriority(EXTI3_IRQn, 6, 0);
+    HAL_NVIC_SetPriority(EXTI4_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-    HAL_NVIC_EnableIRQ(EXTI2_IRQn);
     HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+    HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 }
 
 void MX_DMA_Init(void)
@@ -135,7 +142,7 @@ void MX_ADC1_Init(void)
 
     /* 4 个通道：电池/模拟1/模拟2/电流。ADC1_IN10..13 = PC0..PC3，
        与 HAL_ADC_MspInit 中 GPIOC 模拟引脚配置一致；
-       PA0..PA3 已被按键/RS485 DE 占用，不可用于 ADC。 */
+       PA0 为按键(WK_UP)、PA2/PA3 为 RS485(USART2) 占用，不可用于 ADC。 */
     const uint32_t chans[ADC_CH_COUNT] = {
         ADC_CHANNEL_10, ADC_CHANNEL_11, ADC_CHANNEL_12, ADC_CHANNEL_13};
     for (int i = 0; i < ADC_CH_COUNT; i++)
@@ -181,7 +188,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef *a)
 void MX_I2C1_Init(void)
 {
     hi2c_1.Instance = I2C1;
-    hi2c_1.Init.ClockSpeed = 400000;
+    hi2c_1.Init.ClockSpeed = 100000; /* 100kHz：内部上拉(~40k)下 400kHz 边沿太慢会失败 */
     hi2c_1.Init.DutyCycle = I2C_DUTYCYCLE_2;
     hi2c_1.Init.OwnAddress1 = 0;
     hi2c_1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -198,7 +205,7 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *i)
         __HAL_RCC_GPIOB_CLK_ENABLE();
         g.Pin = GPIO_PIN_6 | GPIO_PIN_7; /* SCL PB6 / SDA PB7 */
         g.Mode = GPIO_MODE_AF_OD;
-        g.Pull = GPIO_NOPULL;
+        g.Pull = GPIO_PULLUP; /* I2C 开漏必须上拉；无外部上拉时先用内部上拉兜底 */
         g.Speed = GPIO_SPEED_FREQ_HIGH;
         g.Alternate = GPIO_AF4_I2C1;
         HAL_GPIO_Init(GPIOB, &g);
@@ -225,13 +232,17 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef *s)
     GPIO_InitTypeDef g = {0};
     if (s->Instance == SPI1)
     {
-        __HAL_RCC_GPIOA_CLK_ENABLE();
-        g.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7; /* SCK/MISO/MOSI */
+        /* 探索者板载 W25Q128 接 SPI1：PB3=SCK PB4=MISO PB5=MOSI
+           F407 与 F1 不同：没有 AFIO->MAPR SWJ_CFG 寄存器，不需要关 JTAG。
+           把 PB3/PB4 的 MODER 设为复用、AFR 设为 AF5 即可让引脚脱离 JTAG
+           交给 SPI1。下面 HAL_GPIO_Init 已经完成这一步。 */
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+        g.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5; /* SCK/MISO/MOSI */
         g.Mode = GPIO_MODE_AF_PP;
         g.Pull = GPIO_NOPULL;
         g.Speed = GPIO_SPEED_FREQ_HIGH;
         g.Alternate = GPIO_AF5_SPI1;
-        HAL_GPIO_Init(GPIOA, &g);
+        HAL_GPIO_Init(GPIOB, &g);
         __HAL_RCC_SPI1_CLK_ENABLE();
     }
 }
@@ -280,13 +291,13 @@ void HAL_UART_MspInit(UART_HandleTypeDef *u)
     else if (u->Instance == USART2)
     {
         __HAL_RCC_USART2_CLK_ENABLE();
-        __HAL_RCC_GPIOD_CLK_ENABLE();
-        g.Pin = GPIO_PIN_5 | GPIO_PIN_6; /* TX=PD5 / RX=PD6, 避开 PA2/PA3 按键 */
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+        g.Pin = GPIO_PIN_2 | GPIO_PIN_3; /* TX=PA2 / RX=PA3（探索者标准） */
         g.Mode = GPIO_MODE_AF_PP;
         g.Pull = GPIO_PULLUP;
         g.Speed = GPIO_SPEED_FREQ_HIGH;
         g.Alternate = GPIO_AF7_USART2;
-        HAL_GPIO_Init(GPIOD, &g);
+        HAL_GPIO_Init(GPIOA, &g);
 
         /* DMA1 Stream5 Channel4 -> USART2_RX */
         hdma_usart2_rx.Instance = DMA1_Stream5;
@@ -365,4 +376,65 @@ void MX_RTC_Init(void)
     /* 唤醒定时器中断（低功耗 STOP 周期唤醒喂狗用） */
     HAL_NVIC_SetPriority(RTC_WKUP_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(RTC_WKUP_IRQn);
+}
+
+/* ================= FSMC：TFT LCD（ILI9488，8080 并口，Bank1 NE4） ================= */
+/* 探索者板载 LCD 走 FSMC Bank1 region4（NE4=PD7），A6(PD11) 作 RS 区分命令/数据。
+   数据线 D0-D15 与控制线 RD/WR/CS/RS 是 F407 芯片固定的 FSMC 复用脚(AF12)，
+   不可更改；RST(PB15)/背光(PB0) 为普通 GPIO（宏见 board_config.h）。 */
+void MX_FSMC_Init(void)
+{
+    GPIO_InitTypeDef g = {0};
+
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+
+    /* 数据线 D0-D15（AF12）：
+       D0=PD14 D1=PD15 D2=PD0 D3=PD1 D13=PD8 D14=PD9 D15=PD10 */
+    g.Mode = GPIO_MODE_AF_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    g.Alternate = GPIO_AF12_FSMC;
+    g.Pin = GPIO_PIN_14 | GPIO_PIN_15 | GPIO_PIN_0 | GPIO_PIN_1 |
+            GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10;
+    HAL_GPIO_Init(GPIOD, &g);
+
+    /* D4=PE7 ... D12=PE15 */
+    g.Pin = GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 |
+            GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+    HAL_GPIO_Init(GPIOE, &g);
+
+    /* 控制线：RD=PD4(NOE) WR=PD5(NWE) CS=PD7(NE4) RS=PD11(A6) */
+    g.Pin = GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_7 | GPIO_PIN_11;
+    HAL_GPIO_Init(GPIOD, &g);
+
+    /* RST(PB15) / BL(PB0) 普通推挽输出 */
+    GPIO_InitTypeDef go = {0};
+    go.Mode = GPIO_MODE_OUTPUT_PP;
+    go.Pull = GPIO_NOPULL;
+    go.Speed = GPIO_SPEED_FREQ_HIGH;
+    go.Pin = LCD_RST_PIN;
+    HAL_GPIO_Init(LCD_RST_PORT, &go);
+    go.Pin = LCD_BL_PIN;
+    HAL_GPIO_Init(LCD_BL_PORT, &go);
+
+    /* FSMC 时钟 + Bank1 NE4 配置（异步 NOR/SRAM 模式，16bit） */
+    __HAL_RCC_FSMC_CLK_ENABLE();
+
+    FSMC_Bank1->BTCR[6] = 0;   /* BCR4 */
+    FSMC_Bank1->BTCR[7] = 0;   /* BTR4 */
+    /* 注意：BWTR 数组基址是 0x104(BWTR1)，region4 的 BWTR4 对应索引 [3]
+       （BWTR[0]=BWTR1 … BWTR[3]=BWTR4），不能用 [6] 否则写到保留地址。 */
+    FSMC_Bank1E->BWTR[3] = 0;  /* BWTR4 */
+
+    /* BCR4：数据宽度 16bit + 写使能 + 扩展模式（读写用不同时序） */
+    FSMC_Bank1->BTCR[6] = FSMC_BCR1_MWID_0 | FSMC_BCR1_WREN | FSMC_BCR1_EXTMOD;
+    /* BTR4 读时序：ADDSET=15, DATAST=60（读 LCD ID 需较慢时序） */
+    FSMC_Bank1->BTCR[7] = (15u << FSMC_BTR1_ADDSET_Pos) |
+                          (60u << FSMC_BTR1_DATAST_Pos);
+    /* BWTR4 写时序：ADDSET=3, DATAST=3（写 GRAM 可快） */
+    FSMC_Bank1E->BWTR[3] = (3u << FSMC_BTR1_ADDSET_Pos) |
+                           (3u << FSMC_BTR1_DATAST_Pos);
+    /* 使能 Bank1 region4 */
+    FSMC_Bank1->BTCR[6] |= FSMC_BCR1_MBKEN;
 }

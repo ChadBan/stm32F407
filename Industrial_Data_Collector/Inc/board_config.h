@@ -37,36 +37,40 @@ extern RTC_HandleTypeDef hrtc;       /* RTC：日历 + 唤醒                   
 #define LED_RUN_PORT GPIOC
 #define LED_RUN_PIN GPIO_PIN_13
 
-/* RS485 收发方向控制（DE/RE 并联，推挽输出） */
-#define RS485_DE_PORT GPIOA
-#define RS485_DE_PIN GPIO_PIN_1
+/* RS485 收发方向控制（探索者标准：SP3485 的 DE/RE 并联，经跳线帽 P7 接 PG9，
+   默认低电平=接收。若你的板子方向脚在别处，只改这里即可） */
+#define RS485_DE_PORT GPIOG
+#define RS485_DE_PIN GPIO_PIN_9
 #define RS485_SET_TX() HAL_GPIO_WritePin(RS485_DE_PORT, RS485_DE_PIN, GPIO_PIN_SET)
 #define RS485_SET_RX() HAL_GPIO_WritePin(RS485_DE_PORT, RS485_DE_PIN, GPIO_PIN_RESET)
 
-/* 蜂鸣器（有源/无源由 TIM4-CH1 PWM 驱动，PB7 复用；此处为使能脚，可选） */
+/* 蜂鸣器（无源，由 TIM4-CH1 PWM 驱动，PD12 复用，见 board_periph.c） */
 #define BUZZER_TIM_CH TIM_CHANNEL_1
 #define BUZZER_PWM_PERIOD_HZ 2000 /* 无源蜂鸣器共振频率，按实际器件调整 */
 
-/* 按键（EXTI 输入，下拉，高电平有效；3 路：确认/上/下）
-   低功耗唤醒：F407 STOP 仅 PA0(WKUP) 可直接唤醒，故 KEY_OK(PA0) 兼任唤醒键。 */
+/* 按键（探索者标准，3 路：确认/上/下）
+   WK_UP(PA0)：下拉，按下接 3.3V → 高电平有效；兼 STOP 唤醒（F407 仅 PA0 可 WKUP）
+   KEY1(PE3)/KEY0(PE4)：上拉，按下接地 → 低电平有效
+   active_high 区分两种极性，bsp_key_pressed 据此归一化返回“是否按下”。 */
 typedef enum
 {
-    KEY_OK = 0, /* PA0   EXTI0 / WKUP */
-    KEY_UP,     /* PA2  EXTI2  */
-    KEY_DOWN,   /* PA3  EXTI3  */
+    KEY_OK = 0, /* PA0   EXTI0 / WK_UP */
+    KEY_UP,     /* PE3   EXTI3 / KEY1  */
+    KEY_DOWN,   /* PE4   EXTI4 / KEY0  */
     KEY_ID_MAX
 } key_id_t;
 
-/* 按键引脚映射（下标与 key_id_t 对应；均配置为下拉输入，高电平有效）*/
+/* 按键引脚映射（下标与 key_id_t 对应）*/
 typedef struct
 {
     GPIO_TypeDef *port;
     uint16_t pin;
+    bool active_high; /* true=按下高电平(WK_UP)，false=按下低电平(KEY0/1) */
 } key_pin_t;
-#define KEY_PIN_TABLE {                        \
-    {GPIOA, GPIO_PIN_0}, /* KEY_OK   EXTI0  */ \
-    {GPIOA, GPIO_PIN_2}, /* KEY_UP   EXTI2  */ \
-    {GPIOA, GPIO_PIN_3}, /* KEY_DOWN EXTI3  */ \
+#define KEY_PIN_TABLE {                             \
+    {GPIOA, GPIO_PIN_0, true }, /* KEY_OK   高有效 */ \
+    {GPIOE, GPIO_PIN_3, false}, /* KEY_UP   低有效 */ \
+    {GPIOE, GPIO_PIN_4, false}, /* KEY_DOWN 低有效 */ \
 }
 
 /* 电池电压采集分压比：R1/R2 组成的分压，ADC 输入 = Vbat * R2/(R1+R2) */
@@ -84,11 +88,25 @@ typedef enum
     ADC_CH_COUNT
 } adc_channel_t;
 
-/* W25Q128 SPI Flash 片选（软件控制，推挽输出，低有效） */
-#define W25Q_CS_PORT GPIOA
-#define W25Q_CS_PIN GPIO_PIN_8
+/* W25Q128 SPI Flash 片选（软件控制，推挽输出，低有效）
+   探索者板载 W25Q128 接 SPI1：PB3=SCK PB4=MISO PB5=MOSI PB14=CS */
+#define W25Q_CS_PORT GPIOB
+#define W25Q_CS_PIN GPIO_PIN_14
 #define W25Q_CS_LOW() HAL_GPIO_WritePin(W25Q_CS_PORT, W25Q_CS_PIN, GPIO_PIN_RESET)
 #define W25Q_CS_HIGH() HAL_GPIO_WritePin(W25Q_CS_PORT, W25Q_CS_PIN, GPIO_PIN_SET)
+
+/* 3.5寸 TFT LCD（ILI9488 480x320）FSMC 8080 16bit 并口（探索者板载）
+   数据线 D0-D15、RD/WR/CS/RS 由 FSMC 硬件固定映射（见 board_periph.c 的
+   MX_FSMC_Init），此处只定义两个普通 GPIO：
+   RST=PB15（LCD 复位）、BL=PB0（背光，经 S8050 三极管，高电平点亮）。 */
+#define LCD_RST_PORT GPIOB
+#define LCD_RST_PIN  GPIO_PIN_15
+#define LCD_BL_PORT  GPIOB
+#define LCD_BL_PIN   GPIO_PIN_0
+#define LCD_RST_LOW()  HAL_GPIO_WritePin(LCD_RST_PORT, LCD_RST_PIN, GPIO_PIN_RESET)
+#define LCD_RST_HIGH() HAL_GPIO_WritePin(LCD_RST_PORT, LCD_RST_PIN, GPIO_PIN_SET)
+#define LCD_BL_ON()    HAL_GPIO_WritePin(LCD_BL_PORT, LCD_BL_PIN, GPIO_PIN_SET)
+#define LCD_BL_OFF()   HAL_GPIO_WritePin(LCD_BL_PORT, LCD_BL_PIN, GPIO_PIN_RESET)
 
 /* ADC 参考电压(mV)与满量程(12bit) */
 #define ADC_VREF_MV 3300

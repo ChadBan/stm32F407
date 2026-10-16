@@ -68,6 +68,9 @@ uint16_t modbus_process_frame(const modbus_cfg_t *cfg,
     case FC_READ_HOLDING:
     case FC_READ_INPUT:
     {
+        /* 广播(addr=0)仅限写操作，读请求不应有响应（Modbus 规范） */
+        if (broadcast)
+            return 0;
         if (req_len != 8)
             return 0;
         uint16_t reg = (req[2] << 8) | req[3];

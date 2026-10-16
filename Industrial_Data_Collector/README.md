@@ -35,7 +35,7 @@ Middlewares/    FreeRTOS/FreeRTOSConfig.h
 |------|------|------|
 | ADC1 | 4 通道 + DMA 循环 | 电池/模拟量/电流，非轮询 |
 | I2C1 | SHT30(0x44) + OLED(0x3C) | 温湿度 + 显示，总线互斥锁 |
-| SPI1 | W25Q128(CS=PA8) | 参数/日志掉电存储 |
+| SPI1 | W25Q128(CS=PB14) | 参数/日志掉电存储 |
 | USART1 | 调试 printf | fputc 重定向 |
 | USART2 | RS485(DE=PA1) | Modbus-RTU，DMA+IDLE |
 | TIM4-CH1 | 蜂鸣器 PWM | 报警变调鸣响 |

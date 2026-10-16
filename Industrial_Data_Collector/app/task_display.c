@@ -1,13 +1,13 @@
 /**
  * @file    task_display.c
- * @brief   显示任务：消费采集队列，按当前页面刷新 OLED（主界面/时间/参数/状态）
+ * @brief   显示任务：消费采集队列，按当前页面刷新 TFT LCD（主界面/时间/参数/状态）
  *
  * 低优先级；vTaskDelayUntil 周期刷新，队列有更新即画最新一帧。
- * 字体仅 A-Z/0-9 及少量符号，故所有标签用大写英文。
+ * 屏幕为 480x320，8x16 字符（每字符 8 像素宽），标签一律大写英文。
  */
 #include "app_tasks.h"
 #include "app_state.h"
-#include "dev_oled.h"
+#include "dev_lcd.h"
 #include "dev_w25q.h"
 #include "bsp_wdg.h"
 #include "util_time.h"
@@ -24,44 +24,43 @@ static const char *BAUD_STR[5] = {"9600", "19200", "38400", "57600", "115200"};
 
 static void draw_main(const collect_sample_t *s)
 {
-    char line[20];
-    oled_clear();
-    oled_puts(0, 8, "T:");
-    fmt_temp10(s->temp_x1000, line, sizeof(line));
-    oled_puts(18, 8, line);
-    oled_puts(66, 8, "C");
+    char line[24];
+    lcd_clear(COLOR_BLACK);
 
-    oled_puts(0, 20, "H:");
+    lcd_show_string(8, 32, "T:", COLOR_YELLOW, COLOR_BLACK);
+    fmt_temp10(s->temp_x1000, line, sizeof(line));
+    lcd_show_string(32, 32, line, COLOR_WHITE, COLOR_BLACK);
+    lcd_show_string(80, 32, "C", COLOR_YELLOW, COLOR_BLACK);
+
+    lcd_show_string(8, 96, "H:", COLOR_YELLOW, COLOR_BLACK);
     snprintf(line, sizeof(line), "%d.%d", (int)(s->humi_x1000 / 1000),
              (int)(s->humi_x1000 / 100 % 10));
-    oled_puts(18, 20, line);
-    oled_puts(66, 20, "%");
+    lcd_show_string(32, 96, line, COLOR_WHITE, COLOR_BLACK);
+    lcd_show_string(80, 96, "%", COLOR_YELLOW, COLOR_BLACK);
 
-    oled_puts(0, 32, "BAT");
+    lcd_show_string(8, 160, "BAT:", COLOR_YELLOW, COLOR_BLACK);
     snprintf(line, sizeof(line), "%dMV", (int)s->battery_mv);
-    oled_puts(24, 32, line);
+    lcd_show_string(48, 160, line, COLOR_WHITE, COLOR_BLACK);
 
     /* 无有效温度数据时提示错误，便于现场排查传感器 */
     if (!(s->valid_bits & PARAM_VALID_BITS_TEMP))
-        oled_puts(0, 44, "SENS ERR");
-    oled_flush();
+        lcd_show_string(8, 224, "SENS ERR", COLOR_RED, COLOR_BLACK);
 }
 
 static void draw_time(const collect_sample_t *s)
 {
-    char buf[20];
-    oled_clear();
-    oled_puts(0, 0, "TIME");
+    char buf[32];
+    lcd_clear(COLOR_BLACK);
+    lcd_show_string(8, 32, "TIME", COLOR_YELLOW, COLOR_BLACK);
     if (s->valid_bits & VALID_BITS_TIME)
     {
         dt_format(&s->ts, buf, sizeof(buf));
-        oled_puts(0, 16, buf);
+        lcd_show_string(8, 96, buf, COLOR_WHITE, COLOR_BLACK);
     }
     else
     {
-        oled_puts(0, 16, "RTC ERR");
+        lcd_show_string(8, 96, "RTC ERR", COLOR_RED, COLOR_BLACK);
     }
-    oled_flush();
 }
 
 static void draw_param(void)
@@ -69,57 +68,57 @@ static void draw_param(void)
     device_params_t p;
     app_get_params(&p);
     uint8_t field = app_get_param_field();
-    char line[20];
-    const uint8_t row_y[5] = {12, 22, 32, 42, 52};
+    char line[24];
+    const uint8_t row_y[5] = {64, 96, 128, 160, 192};
 
-    oled_clear();
-    oled_puts(48, 0, "SET");
+    lcd_clear(COLOR_BLACK);
+    lcd_show_string(8, 24, "SET", COLOR_YELLOW, COLOR_BLACK);
 
     fmt_temp10((int32_t)p.temp_alarm_hi * 100, line, sizeof(line));
-    oled_puts(8, row_y[0], "T.HI");
-    oled_puts(48, row_y[0], line);
-    fmt_temp10((int32_t)p.temp_alarm_lo * 100, line, sizeof(line));
-    oled_puts(8, row_y[1], "T.LO");
-    oled_puts(48, row_y[1], line);
-    snprintf(line, sizeof(line), "BAT %d", (int)p.batt_alarm_mv);
-    oled_puts(8, row_y[2], line);
-    snprintf(line, sizeof(line), "ADR %d", (int)p.modbus_addr);
-    oled_puts(8, row_y[3], line);
-    snprintf(line, sizeof(line), "BAUD %s", BAUD_STR[p.baud_code > 4 ? 0 : p.baud_code]);
-    oled_puts(8, row_y[4], line);
+    lcd_show_string(8, row_y[0], "T.HI", COLOR_WHITE, COLOR_BLACK);
+    lcd_show_string(64, row_y[0], line, COLOR_CYAN, COLOR_BLACK);
 
-    /* 光标：选中行左侧画短横 */
-    oled_hline(0, (uint8_t)(row_y[field] + 6), 6);
-    oled_flush();
+    fmt_temp10((int32_t)p.temp_alarm_lo * 100, line, sizeof(line));
+    lcd_show_string(8, row_y[1], "T.LO", COLOR_WHITE, COLOR_BLACK);
+    lcd_show_string(64, row_y[1], line, COLOR_CYAN, COLOR_BLACK);
+
+    snprintf(line, sizeof(line), "BAT %d", (int)p.batt_alarm_mv);
+    lcd_show_string(8, row_y[2], line, COLOR_WHITE, COLOR_BLACK);
+
+    snprintf(line, sizeof(line), "ADR %d", (int)p.modbus_addr);
+    lcd_show_string(8, row_y[3], line, COLOR_WHITE, COLOR_BLACK);
+
+    snprintf(line, sizeof(line), "BAUD %s", BAUD_STR[p.baud_code > 4 ? 0 : p.baud_code]);
+    lcd_show_string(8, row_y[4], line, COLOR_WHITE, COLOR_BLACK);
+
+    /* 光标：选中行左侧画一竖条色块 */
+    if (field < 5)
+        lcd_fill(0, row_y[field], 4, (uint16_t)(row_y[field] + 15), COLOR_YELLOW);
 }
 
 static void draw_status(void)
 {
     uint8_t a = app_get_alarm_bits();
-    char line[20];
-    oled_clear();
-    oled_puts(0, 0, "STATUS");
+    char line[24];
+    lcd_clear(COLOR_BLACK);
+    lcd_show_string(8, 32, "STATUS", COLOR_YELLOW, COLOR_BLACK);
     if (a == 0)
     {
-        oled_puts(0, 14, "NORMAL");
+        lcd_show_string(8, 96, "NORMAL", COLOR_GREEN, COLOR_BLACK);
     }
     else
     {
-        oled_puts(0, 14, "ALARM");
-        /* 各行错开，避免同坐标互相覆盖 */
-        if (a & ALM_BIT_TEMP_HI)
-            oled_puts(0, 26, "TEMP HI");
-        if (a & ALM_BIT_TEMP_LO)
-            oled_puts(0, 38, "TEMP LO");
-        if (a & ALM_BIT_BATT_LO)
-            oled_puts(0, 50, "BATT LO");
-        if (a & ALM_BIT_SENSOR)
-            oled_puts(72, 26, "SENS");
+        lcd_show_string(8, 96, "ALARM", COLOR_RED, COLOR_BLACK);
+        uint8_t y = 128;
+        if (a & ALM_BIT_TEMP_HI) { lcd_show_string(8, y, "TEMP HI", COLOR_RED, COLOR_BLACK); y += 24; }
+        if (a & ALM_BIT_TEMP_LO) { lcd_show_string(8, y, "TEMP LO", COLOR_RED, COLOR_BLACK); y += 24; }
+        if (a & ALM_BIT_BATT_LO) { lcd_show_string(8, y, "BATT LO", COLOR_RED, COLOR_BLACK); y += 24; }
+        if (a & ALM_BIT_SENSOR)  { lcd_show_string(8, y, "SENS", COLOR_RED, COLOR_BLACK); }
     }
+
     /* 历史日志已存条数（仅读 RTC 备份寄存器，无 SPI 开销） */
     snprintf(line, sizeof(line), "LOG %d", (int)w25q_log_count());
-    oled_puts(0, 56, line);
-    oled_flush();
+    lcd_show_string(8, 288, line, COLOR_GRAY, COLOR_BLACK);
 }
 
 void display_task(void *arg)

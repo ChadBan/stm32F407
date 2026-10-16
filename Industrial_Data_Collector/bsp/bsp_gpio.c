@@ -34,7 +34,8 @@ bool bsp_key_pressed(key_id_t id)
     if (id >= KEY_ID_MAX)
         return false;
     GPIO_PinState s = HAL_GPIO_ReadPin(g_key_pins[id].port, g_key_pins[id].pin);
-    return s == GPIO_PIN_SET; /* 下拉输入，按下为高 */
+    /* 归一化：WK_UP(高有效)按下为高；KEY0/1(低有效)按下为低 */
+    return g_key_pins[id].active_high ? (s == GPIO_PIN_SET) : (s == GPIO_PIN_RESET);
 }
 
 bool bsp_key_take_edge(key_id_t id)
