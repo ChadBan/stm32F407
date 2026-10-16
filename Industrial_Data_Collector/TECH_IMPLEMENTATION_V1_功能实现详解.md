@@ -11,7 +11,7 @@
 
 1. [系统启动流程](#1-系统启动流程)
 2. [采集功能](#2-采集功能-task_collect)
-3. [显示功能](#3-显示功能-task_display--dev_oled)
+3. [显示功能](#3-显示功能-task_display--dev_lcd)
 4. [按键与参数配置](#4-按键与参数配置-task_key)
 5. [Modbus 通讯](#5-modbus-通讯-task_comm--dev_modbus--bsp_uart)
 6. [报警功能](#6-报警功能-task_alarm)
@@ -29,7 +29,7 @@
 ### 业务逻辑
 
 上电后依次完成：内核/HAL 初始化 → 168MHz 时钟 → 各外设初始化 → 状态中心
-（含 Flash 参数恢复）→ OLED → 创建 5 个业务任务 → 启动调度器。
+（含 Flash 参数恢复）→ TFT LCD → 创建 5 个业务任务 → 启动调度器。
 
 ### 代码实现（Src/main.c）
 
@@ -40,7 +40,7 @@ int main(void)
     SystemClock_Config();    /* HSE 8M x PLL -> 168MHz */
     bsp_init_all();          /* 见下 */
     (void)app_state_init();  /* 创建锁/队列 + 从 Flash 恢复参数 */
-    (void)oled_init();       /* SSD1306 初始化序列 */
+    lcd_init();              /* TFT LCD(ILI9488) 初始化序列 */
     (void)app_tasks_start(); /* 创建 5 个任务 */
     vTaskStartScheduler();   /* 不再返回 */
 }
@@ -75,13 +75,26 @@ FreeRTOS 接管 SysTick 后不再调用 `HAL_IncTick()`，而工程大量使用
 /* FreeRTOSConfig.h：把 port.c 的 tick 函数改名 */
 #define xPortSysTickHandler SysTick_Handler_FreeRTOS
 
-/* Src/stm32f4xx_it.c：真正的 SysTick_Handler 先喂 HAL 时基再进 FreeRTOS */
+/* Src/stm32f4xx_it.c：先无条件喂 HAL 时基，调度器启动后才转发内核 tick */
 void SysTick_Handler(void)
 {
     HAL_IncTick();
-    SysTick_Handler_FreeRTOS();
+    if (g_rtos_started)
+        SysTick_Handler_FreeRTOS();
 }
 ```
+
+`g_rtos_started` 由 `sys_tick_rtos_enable()` 在 `vTaskStartScheduler()` 前一行
+置位——防止内核还没就绪就误转内核 tick。
+
+**真机联调才发现的最隐蔽坑（修复记录 17 号）**：即便上面分发代码完全正确，
+调度器启动前调用 `xSemaphoreCreateMutex()`/`xQueueCreate()` 等 FreeRTOS API
+会进出临界区；port.c 的临界区嵌套计数初值是官方哨兵 0xAAAAAAAA，只有
+`xPortStartScheduler()` 才会重置为 0。于是启动阶段“退临界区”永远退不干净，
+BASEPRI 被永久卡在 0x50，SysTick（优先级 15）被硬件屏蔽 → `HAL_GetTick()`
+恒 0 → 启动路径上所有 `HAL_Delay()` 死循环。对策（main.c）：启动关键点显式
+`__set_BASEPRI(0)`；启动阶段需要超时的地方一律用 DWT 周期计数忙等
+（dev_w25q.c 的 `w25q_wait_busy()`），禁止依赖 tick。
 
 ---
 
@@ -212,46 +225,52 @@ if ((cycle % LOG_EVERY_N) == 0) {
 
 ---
 
-## 3. 显示功能（task_display + dev_oled）
+## 3. 显示功能（task_display + dev_lcd）
 
 ### 业务逻辑
 
 200ms 周期渲染当前页面；消费队列只保留最新样本（队列满说明显示跟不上，
-直接丢弃中间帧防止滞后累积）；渲染分"改帧缓冲"与"整屏 flush"两阶段。
+直接丢弃中间帧防止滞后累积）；渲染为 FSMC 并口直写，字符级更新无需整屏刷。
 
-### 3.1 帧缓冲 + 整屏刷新（dev_oled.c）
+### 3.1 FSMC 8080 并口直写（dev_lcd.c）
+
+屏幕是探索者板载 3.5 寸 TFT LCD（ILI9488，480×320 横屏），走 FSMC Bank1
+region4（NE4=PD7）8080 16bit 并口，与 I2C 完全无关。FSMC 把 LCD 的寄存器/
+GRAM 映射成内存地址，写屏就是写内存，无需帧缓冲：
 
 ```c
-static uint8_t g_fb[OLED_PAGES][OLED_WIDTH];  /* 1024B，bit=1 点亮 */
+#define LCD_REG (*(volatile uint16_t *)0x6C000000UL)          /* RS=0 命令 */
+#define LCD_RAM (*(volatile uint16_t *)(0x6C000000UL | 0x80UL)) /* RS=1 数据 */
 
-bool oled_flush(void)
-{
-    for (uint8_t page = 0; page < OLED_PAGES; page++) {
-        /* 先发页地址命令(B0+page, 00, 10)，再发 1+128 字节数据块 */
-        ...
-        buf[0] = CTRL_DATA;  /* 0x40：Co=0,D/C=1 */
-        memcpy(&buf[1], g_fb[page], OLED_WIDTH);
-        bsp_i2c_write(OLED_ADDR, buf, sizeof(buf), 50);
-    }
-}
+static void lcd_write_cmd(uint8_t cmd) { LCD_REG = cmd; }
+static void lcd_write_data16(uint16_t d) { LCD_RAM = d; }
+
+/* 写窗口(0x2A/0x2B)后连发像素，硬件自动按行填 GRAM */
+void lcd_fill(x0, y0, x1, y1, color)
 ```
 
-好处：画面先完整写缓冲再一次性刷，避免逐字 I2C 慢速导致撕裂；每次 flush
-8 个 page × 129B 共 8 次 I2C 事务。
+背光与复位为普通 GPIO（BL=PB0、RST=PB15），初始化序列见 `lcd_init()`
+（ILI9488 gamma/VCOM/MADCTL 0x28=横屏 BGR + sleep out + display on）。
+
+**I2C 自愈（修复记录 19 号）**：I2C1 上现在只剩 SHT30。SHT30 缺席时每次访问
+NACK，而本工程所用 HAL 版本的错误返回路径**不复位句柄状态**——一次 NACK 后
+该总线上所有后续操作永久返回 HAL_BUSY（当初 OLED 屏挂在 I2C 上时表现就是
+屏幕全黑）。对策见 bsp_i2c.c：任一 `bsp_i2c_*` 操作失败后立即
+`HAL_I2C_DeInit` + `HAL_I2C_Init` 重建外设与句柄（`i2c_recover()`，在互斥锁
+保护内调用），总线因此允许“存在缺席的从机”，SHT30 每周期重试不影响系统。
 
 ### 3.2 字体渲染
 
-5×7 ASCII 列式字模（如 `'A' = {0x7E,0x11,0x11,0x11,0x7E}`），bit0=最上行；
-未收录字符画空心框（现场排查乱码来源）；步进 6 像素排版，超宽截断：
+8×16 ASCII 行序字模（dev_lcd.c 内 FONT8x16，覆盖 0x20-0x5F），bit7=最左像素；
+小写自动降级为大写；超出屏幕边界的字符直接不画：
 
 ```c
-uint8_t oled_puts(uint8_t x, uint8_t y, const char *s)
+void lcd_show_string(uint16_t x, uint16_t y, const char *s, uint16_t color, uint16_t bg)
 {
-    while (*s && x + 6 <= OLED_WIDTH) {
-        oled_putc(x, y, *s++);
-        x = (uint8_t)(x + 6);   /* 5 列 + 1 间隔 */
+    while (*s) {
+        lcd_show_char(x, y, *s++, color, bg);
+        x += LCD_CHAR_W;   /* 每字符 8 像素宽 */
     }
-    return x;
 }
 ```
 
@@ -263,7 +282,7 @@ uint8_t oled_puts(uint8_t x, uint8_t y, const char *s)
 fmt_temp10(s->temp_x1000, line, sizeof(line));  /* x1000 -> "23.4" 字符串 */
 ...
 if (!(s->valid_bits & PARAM_VALID_BITS_TEMP))
-    oled_puts(0, 44, "SENS ERR");   /* 现场可直接定位 SHT30 问题 */
+    lcd_show_string(8, 224, "SENS ERR", COLOR_RED, COLOR_BLACK);   /* 定位 SHT30 问题 */
 ```
 
 `fmt_temp10` 处理负号：`-12345 -> "-12.3"`（符号位与绝对值分开格式化）。
@@ -276,7 +295,7 @@ if (!(s->valid_bits & PARAM_VALID_BITS_TEMP))
 ```c
 const uint8_t row_y[5] = {12, 22, 32, 42, 52};
 ...
-oled_hline(0, row_y[field] + 6, 6);  /* 选中行左侧 6 像素短横 */
+lcd_fill(0, row_y[field], 4, (uint16_t)(row_y[field] + 15), COLOR_YELLOW);  /* 选中行左侧色块 */
 ```
 
 **状态页 PAGE_STATUS**：报警位 → 文字行错开坐标显示；LOG 条数来自
@@ -846,11 +865,15 @@ frame[payload_len + 1] = (uint8_t)((crc >> 8) & 0xFF);
 | 14 | SHT30 换算溢出 | int32/uint32 中间值超范围 | int64/uint64 |
 | 15 | 启动文件不兼容 | IAR 语法 + GCC 工具链 | ST 官方 GCC 版 |
 | 16 | 互斥锁链接失败 | configUSE_MUTEXES 未开 | 显式开启 |
+| 17 | 启动卡死 HAL_Delay | 调度器前临界区哨兵把 BASEPRI 永久卡 0x50，SysTick 被屏蔽、uwTick 冻结 | main.c 关键点 __set_BASEPRI(0)；启动期超时改 DWT 周期忙等 |
+| 18 | 板载 W25Q 无响应(MISO 恒 0xFF) | SPI1 引脚误配 PA5/6/7+PA8，板载 Flash 实接 PB3/4/5+PB14 | 改 board_config/board_periph 引脚；PB3/4 配 AF5 即脱离 JTAG（实测无需 MAPR） |
+| 19 | I2C 永久 HAL_BUSY | SHT30 缺席 NACK 后该 HAL 版本错误路径不复位 hState，同总线后续操作全失败（曾致挂 I2C 的 OLED 全黑） | bsp_i2c 失败后 DeInit+Init 重建外设(i2c_recover) |
 
 ### 12.2 进度
 
 - ✅ 全部代码完成，`make` 零警告零错误，产物 Flash 71KB / RAM 24KB。
-- ⏳ 待硬件联调：按实际板子核对 board_config.h（分压比/I2C 地址/蜂鸣
-  频率/DE-RE 并联）后烧录整机验证。
-- ⬜ 拓展选做：CAN2.0A 上报、SDIO 日志、FSMC LCD、RTC 闹钟唤醒、OTA。
+- ✅ 真机联调完成（探索者 F407）：启动链全通、参数持久化与历史日志验证通过；
+  屏幕为板载 TFT LCD（ILI9488/FSMC）；I2C1 上 SHT30 缺席每周期 NACK 属预期
+  （I2C 自愈后不影响系统，屏显 SENS ERR 定位）。
+- ⬜ 拓展选做：CAN2.0A 上报、SDIO 日志、RTC 闹钟唤醒、OTA。
 - ⬜ 可选加固：参数区双备份扇区、按键消音(mute)入口、日志写保护。

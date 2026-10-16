@@ -23,7 +23,7 @@
  * CubeMX 生成的外设句柄（外部声明）
  * ============================================================ */
 extern ADC_HandleTypeDef hadc1;      /* ADC1：软件触发 + DMA 循环采样多通道 */
-extern I2C_HandleTypeDef hi2c_1;     /* I2C1：SHT30 + OLED(SSD1306)         */
+extern I2C_HandleTypeDef hi2c_1;     /* I2C1：SHT30（TFT LCD 走 FSMC 不在 I2C） */
 extern SPI_HandleTypeDef hspi_1;     /* SPI1：W25Q128 Flash                 */
 extern UART_HandleTypeDef huart_dbg; /* USART1：调试串口 (printf)           */
 extern UART_HandleTypeDef huart_485; /* USART2：RS485 (Modbus RTU 从机)     */

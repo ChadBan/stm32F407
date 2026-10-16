@@ -136,9 +136,18 @@ CPU 想让 16 个字节从 ADC 数据寄存器搬到内存数组，自己搬要 
 | 寻址 | 数据开头带 7bit 从机地址 | 无地址，靠 CS 片选线选芯片 | 点对点，无寻址 |
 | 全/半双工 | 半双工（同一根数据线来回） | 全双工（同时收发） | 全双工 |
 
-**I2C 为什么需要互斥锁**：SHT30 和 OLED 挂在同一条 I2C 总线上。FreeRTOS 里
-采集任务和显示任务可能同时想用总线——A 任务发了半个命令，B 任务插话发自己
-的地址，总线上所有芯片都懵。互斥锁保证"一个人用完，下一个人再用"。
+**I2C 为什么需要互斥锁**：SHT30 挂在 I2C1 总线上（TFT LCD 走 FSMC 并口，
+不在 I2C 上）。FreeRTOS 里多个任务可能同时想用总线——A 任务发了半个命令，
+B 任务插话发自己的地址，总线上所有芯片都懵。互斥锁保证“一个人用完，下一
+个人再用”。
+
+**互斥锁防不了的一个坑（真机踩过）**：总线上的从机若没有应答（NACK，例如
+SHT30 没接/没上电），本工程所用 HAL 版本的错误返回路径**不会复位 I2C 句柄
+状态**——一次 NACK 后，接下来同总线上**所有**设备的读写（早期 OLED 屏挂
+在这条 I2C 上时，表现就是整屏黑）都直接返回 HAL_BUSY。对策见 bsp_i2c.c：
+任何一次 I2C 操作失败后立即 `HAL_I2C_DeInit` + `HAL_I2C_Init` 把外设与句柄
+重建一遍（`i2c_recover()` 在互斥锁保护内调用）。这也是“总线上允许存在没接
+的传感器”的前提——没有这层自愈，一个缺席的从机就能瘫痪整条总线。
 
 ## 0.8 Flash 存储的物理特性：为什么擦写这么麻烦
 
@@ -150,8 +159,15 @@ NOR Flash（W25Q128）的存储单元是浮栅晶体管：
 - 写入最小单位是 256B 的**页**，且**不能跨页**（写到页边界必须停下）。
 - 擦写次数有限（典型 10 万次/扇区）。
 
-这就是为什么：改一个参数也要"读旧数据→修改→擦整个扇区→重新写入"；
+这就是为什么：改一个参数也要“读旧数据→修改→擦整个扇区→重新写入”；
 也解释了为什么日志设计成 32B×256 条环形（追加写、满了才整区擦）。
+
+**探索者板上的 W25Q128 接在哪**（真机核实）：SPI1 的 PB3(SCK)/PB4(MISO)/
+PB5(MOSI) + 片选 PB14——不是 SPI1 默认引脚的 PA5/PA6/PA7+PA8。配错引脚会
+MISO 恒读 0xFF（Flash“没接上”）。PB3/PB4 出厂默认是 JTAG 调试脚，本工程
+实测把它们的 MODER 配成复用、AFR 配成 AF5(SPI1) 后即可正常通信，无需额外
+释放操作；若个别硬件上仍被 JTAG 占用，需写 AFIO->MAPR 的 SWJ_CFG[26:24]=010
+（关 JTAG-DP、留 SWD 两根调试线）。
 
 ## 0.9 RS485：差分信号与半双工
 
@@ -222,7 +238,7 @@ int main(void)
     SystemClock_Config();    /* HSE 8M x PLL -> 168MHz */
     bsp_init_all();          /* 见下，顺序有讲究 */
     (void)app_state_init();  /* 创建锁/队列 + 从 Flash 恢复参数 */
-    (void)oled_init();       /* SSD1306 初始化序列 */
+    lcd_init();              /* TFT LCD(ILI9488) 初始化序列 */
     (void)app_tasks_start(); /* 创建 5 个任务 */
     vTaskStartScheduler();   /* 调度器接管，main 不再返回 */
 }
@@ -259,11 +275,12 @@ FreeRTOS 也要用 SysTick 做调度节拍。冲突的解法是分发：
 /* FreeRTOSConfig.h：把 FreeRTOS 的 tick 函数改名 */
 #define xPortSysTickHandler SysTick_Handler_FreeRTOS
 
-/* Src/stm32f4xx_it.c：真正的 SysTick_Handler 先喂 HAL 时基再进 FreeRTOS */
+/* Src/stm32f4xx_it.c：先无条件喂 HAL 时基，调度器启动后才转发内核 tick */
 void SysTick_Handler(void)
 {
     HAL_IncTick();
-    SysTick_Handler_FreeRTOS();
+    if (g_rtos_started)
+        SysTick_Handler_FreeRTOS();
 }
 ```
 
@@ -271,6 +288,16 @@ void SysTick_Handler(void)
 所有基于它的超时判断（Flash 等待、485 发送等待、按键去抖）全部失效，
 `HAL_Delay()` 死循环——设备表现就是随机卡死。这是本工程审查修复的
 第 1 号问题（见 12.1 节）。
+
+**真机联调又发现一层更隐蔽的坑（修复记录 17 号）**：即便上面的分发代码完全
+正确，调度器启动前调用 `xSemaphoreCreateMutex()` 等 FreeRTOS API 会进出临界
+区——port.c 的临界区嵌套计数初值是官方哨兵值 0xAAAAAAAA，只有
+`xPortStartScheduler()` 才会把它重置为 0。因此在启动阶段“退临界区”永远退不
+干净：BASEPRI 被永久留在 0x50（= configMAX_SYSCALL_INTERRUPT_PRIORITY），
+优先级数值 ≥5 的中断（SysTick 的优先级是 15）全被硬件屏蔽 → uwTick 冻结 →
+所有 `HAL_Delay()` 死循环。对策（main.c）：启动路径关键点显式
+`__set_BASEPRI(0)`；启动阶段需要超时的地方一律用 DWT 周期计数忙等
+（dev_w25q.c 的 `w25q_wait_busy()`），禁止依赖 tick。
 
 ---
 
@@ -432,42 +459,43 @@ Flash 有擦写寿命（10 万次/扇区），500ms 一条 1 天就写 17 万次
 
 # 第 3 章 显示功能
 
-### 为什么用帧缓冲 + 整屏刷新
+### 为什么用 FSMC 并口而不是 I2C/SPI 小屏
 
-SSD1306 内部有一块 128×64 bit 的 GDDRAM，屏幕上每个像素对应一个 bit。
-写屏只能**按页**（每页 8 行像素）连续写 128 字节。若程序每显示一个字符就
-发一次 I2C：字符逐字闪烁出现（撕裂感）、I2C 事务次数爆炸（一屏几十次）。
-
-帧缓冲方案：软件里也维护一张 1KB 的"画面草稿"（`g_fb[8][128]`），渲染
-只改草稿（纯内存操作、零 I2C），最后统一刷 8 次 I2C 把草稿抄上屏：
+屏幕是探索者板载 3.5 寸 TFT LCD（ILI9488，480×320 = 15.36 万像素）。若用
+I2C 串口屏（如 SSD1306）传一帧要几万次 I2C 事务、帧率个位数，且彩屏没有
+I2C 方案。FSMC 是 STM32 里给外接存储器留的**并行总线控制器**，8080 模式
+下把 LCD 的“命令/数据”两个通道映射成两个内存地址，CPU 写内存=写屏：
 
 ```c
-bool oled_flush(void)
-{
-    for (uint8_t page = 0; page < OLED_PAGES; page++) {
-        /* 发页地址命令(0xB0+page, 0x00, 0x10) */
-        ...
-        buf[0] = CTRL_DATA;             /* 0x40：接下来是数据不是命令 */
-        memcpy(&buf[1], g_fb[page], OLED_WIDTH);
-        bsp_i2c_write(OLED_ADDR, buf, sizeof(buf), 50);
-    }
-}
+#define LCD_REG (*(volatile uint16_t *)0x6C000000UL)           /* RS=0 命令 */
+#define LCD_RAM (*(volatile uint16_t *)(0x6C000000UL | 0x80UL)) /* RS=1 数据 */
+
+static void lcd_write_cmd(uint8_t cmd) { LCD_REG = cmd; }
+static void lcd_write_data16(uint16_t d) { LCD_RAM = d; }
 ```
+
+0x6C000000 是 FSMC Bank1 region4（片选 NE4=PD7）的映射基址；16bit 数据宽度
+下 HADDR[25:1] 接 FSMC_A[24:0]，所以地址线 A6 由 HADDR[7] 控制——加 0x80
+偏移就是“RS=1 写数据”。写屏流程：先发窗口命令（0x2A 列、0x2B 页），再
+连续写像素，控制器自动换行填 GRAM。背光 BL=PB0、复位 RST=PB15 为普通
+GPIO；初始化序列（gamma/VCOM/MADCTL 0x28=横屏 BGR 等）见 `lcd_init()`。
 
 ### 字符怎么变成像素
 
-5×7 字模：每个字符是一张 5 列 ×7 行的点阵图，列式存储为 7 个字节，
-bit0 = 该列最上一行。例：`'A' = {0x7E,0x11,0x11,0x11,0x7E}`——第一列 7 个
-像素几乎全亮(0x7E)，两侧斜杠靠 0x11。未收录字符画空心框（排查乱码来源）。
+8×16 ASCII 行序字模（FONT8x16，覆盖 0x20-0x5F）：每个字符 16 字节，
+bit7=该行最左像素；小写自动降级为大写；出界字符直接不画：
 
 ```c
-uint8_t oled_puts(uint8_t x, uint8_t y, const char *s)
+void lcd_show_char(uint16_t x, uint16_t y, char ch, uint16_t color, uint16_t bg)
 {
-    while (*s && x + 6 <= OLED_WIDTH) {
-        oled_putc(x, y, *s++);
-        x = (uint8_t)(x + 6);   /* 5 列 + 1 列间隔 */
+    lcd_set_window(x, y, x + 7, y + 15);
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = p[row];
+        for (int col = 0; col < 8; col++) {
+            lcd_write_data16((bits & 0x80) ? color : bg);  /* 前景/背景色逐像素 */
+            bits <<= 1;
+        }
     }
-    return x;
 }
 ```
 
@@ -1124,14 +1152,15 @@ cd Industrial_Data_Collector && make     # 零警告，Flash 71KB / RAM 24KB
 make flash                               # openocd + ST-Link
 ```
 
-验证步骤：USART1 看日志 → OLED 四页面按键切换 → Modbus 工具按 5.7 节映射
+验证步骤：USART1 看日志 → LCD 四页面按键切换 → Modbus 工具按 5.7 节映射
 读写 → 加热/断电传感器验证报警 → 掉电重启验证参数/日志 → 开 sleep_en 静置
 30s 验证休眠唤醒。
 
 ### 12.3 进度
 
 - ✅ 全部代码完成，编译零警告；16 项审查问题全部修复。
-- ⏳ 待硬件联调：按实际原理图核对 `board_config.h`（分压比/I2C 地址/蜂鸣
-  频率/DE-RE 并联方式）后烧录整机验证。
+- ✅ 真机联调完成（探索者 F407）：启动链全通、参数持久化与历史日志验证通过；
+  屏幕为板载 TFT LCD（ILI9488/FSMC）；I2C1 上 SHT30 缺席每周期 NACK 属预期
+  （I2C 自愈后不影响系统，屏显 SENS ERR 定位）。
 - ⬜ 拓展选做：CAN2.0A 上报、SDIO 日志、FSMC LCD、RTC 闹钟唤醒、OTA。
 - ⬜ 可选加固：参数区双备份扇区、按键消音入口、日志写保护。
